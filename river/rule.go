@@ -1,6 +1,7 @@
 package river
 
 import (
+	"reflect"
 	"strings"
 
 	"github.com/siddontang/go-mysql/schema"
@@ -17,6 +18,8 @@ type Rule struct {
 	Type   string   `toml:"type"`
 	Parent string   `toml:"parent"`
 	ID     []string `toml:"id"`
+
+	Where map[string]interface{} `toml:"where"`
 
 	// Default, a MySQL table field name is mapped to Elasticsearch field name.
 	// Sometimes, you want to use different name, e.g, the MySQL file name is title,
@@ -44,6 +47,7 @@ func newDefaultRule(schema string, table string) *Rule {
 	r.Index = lowerTable
 	r.Type = lowerTable
 
+	r.Where = make(map[string]interface{})
 	r.FieldMapping = make(map[string]string)
 
 	return r
@@ -52,6 +56,10 @@ func newDefaultRule(schema string, table string) *Rule {
 func (r *Rule) prepare() error {
 	if r.FieldMapping == nil {
 		r.FieldMapping = make(map[string]string)
+	}
+
+	if r.Where == nil {
+		r.Where = make(map[string]interface{})
 	}
 
 	if len(r.Index) == 0 {
@@ -82,4 +90,13 @@ func (r *Rule) CheckFilter(field string) bool {
 		}
 	}
 	return false
+}
+
+func (r *Rule) CheckWhere(field string, value interface{}) (bool, bool) {
+	val, ok := r.Where[field]
+	if !ok {
+		return false, true
+	}
+	// 配置过该字段值，或者值相等，表示需要同步到ES
+	return true, !ok || reflect.DeepEqual(val, value)
 }

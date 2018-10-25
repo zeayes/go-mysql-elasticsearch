@@ -193,16 +193,24 @@ func (r *River) makeRequest(rule *Rule, action string, rows [][]interface{}) ([]
 			}
 		}
 
-		req := &elastic.BulkRequest{Index: rule.Index, Type: rule.Type, ID: id, Parent: parentID, Pipeline: rule.Pipeline}
-
 		if action == canal.DeleteAction {
-			req.Action = elastic.ActionDelete
+			req := &elastic.BulkRequest{
+				Index: rule.Index,
+				Type: rule.Type,
+				ID: id,
+				Parent: parentID,
+				Pipeline: rule.Pipeline,
+				Action: elastic.ActionDelete,
+			}
 			r.st.DeleteNum.Add(1)
-		} else {
-			r.makeInsertReqData(req, rule, values)
-			r.st.InsertNum.Add(1)
+			reqs = append(reqs, req)
+			continue
 		}
-
+		req := r.makeInsertReqData(rule, values, id, parentID)
+		if req == nil {
+			continue
+		}
+		r.st.InsertNum.Add(1)
 		reqs = append(reqs, req)
 	}
 
@@ -246,30 +254,35 @@ func (r *River) makeUpdateRequest(rule *Rule, rows [][]interface{}) ([]*elastic.
 			}
 		}
 
-		req := &elastic.BulkRequest{Index: rule.Index, Type: rule.Type, ID: beforeID, Parent: beforeParentID}
-
 		if beforeID != afterID || beforeParentID != afterParentID {
-			req.Action = elastic.ActionDelete
+			req := &elastic.BulkRequest{
+				Index: rule.Index,
+				Type: rule.Type,
+				ID: beforeID,
+				Parent: beforeParentID,
+				Action: elastic.ActionDelete,
+			}
+			r.st.DeleteNum.Add(1)
 			reqs = append(reqs, req)
 
-			req = &elastic.BulkRequest{Index: rule.Index, Type: rule.Type, ID: afterID, Parent: afterParentID, Pipeline: rule.Pipeline}
-			r.makeInsertReqData(req, rule, rows[i+1])
-
-			r.st.DeleteNum.Add(1)
-			r.st.InsertNum.Add(1)
-		} else {
-			if len(rule.Pipeline) > 0 {
-				// Pipelines can only be specified on index action
-				r.makeInsertReqData(req, rule, rows[i+1])
-				// Make sure action is index, not create
-				req.Action = elastic.ActionIndex
-				req.Pipeline = rule.Pipeline
-			} else {
-				r.makeUpdateReqData(req, rule, rows[i], rows[i+1])
+			req = r.makeInsertReqData(rule, rows[i+1], afterID, afterParentID)
+			if req == nil {
+				continue
 			}
-			r.st.UpdateNum.Add(1)
+			r.st.InsertNum.Add(1)
+			reqs = append(reqs, req)
+			continue
 		}
-
+		var req *elastic.BulkRequest
+		if len(rule.Pipeline) > 0 {
+			req = r.makeInsertReqData(rule, rows[i+1], beforeID, beforeParentID)
+		} else {
+			req = r.makeUpdateReqData(rule, rows[i], rows[i+1], beforeID, beforeParentID)
+		}
+		if req == nil {
+			continue
+		}
+		r.st.UpdateNum.Add(1)
 		reqs = append(reqs, req)
 	}
 
@@ -372,13 +385,25 @@ func (r *River) getFieldParts(k string, v string) (string, string, string) {
 	return mysql, elastic, fieldType
 }
 
-func (r *River) makeInsertReqData(req *elastic.BulkRequest, rule *Rule, values []interface{}) {
-	req.Data = make(map[string]interface{}, len(values))
-	req.Action = elastic.ActionIndex
+func (r *River) makeInsertReqData(rule *Rule, values []interface{}, id, parentID string) *elastic.BulkRequest {
+	req := &elastic.BulkRequest{
+		Index: rule.Index,
+		Type: rule.Type,
+		ID: id,
+		Parent: parentID,
+		Pipeline: rule.Pipeline,
+		Action: elastic.ActionIndex,
+		Data: make(map[string]interface{}, len(values)),
+	}
 
 	for i, c := range rule.TableInfo.Columns {
 		if !rule.CheckFilter(c.Name) {
 			continue
+		}
+		value := r.makeReqColumnData(&c, values[i])
+		_, pass := rule.CheckWhere(c.Name, value)
+		if !pass {
+			return nil
 		}
 		mapped := false
 		for k, v := range rule.FieldMapping {
@@ -389,24 +414,40 @@ func (r *River) makeInsertReqData(req *elastic.BulkRequest, rule *Rule, values [
 			}
 		}
 		if mapped == false {
-			req.Data[c.Name] = r.makeReqColumnData(&c, values[i])
+			req.Data[c.Name] = value
 		}
 	}
+	return req
 }
 
-func (r *River) makeUpdateReqData(req *elastic.BulkRequest, rule *Rule,
-	beforeValues []interface{}, afterValues []interface{}) {
-	req.Data = make(map[string]interface{}, len(beforeValues))
+func (r *River) makeUpdateReqData(rule *Rule, beforeValues []interface{}, afterValues []interface{}, id, parentID string) *elastic.BulkRequest {
+	req := &elastic.BulkRequest{
+		Index: rule.Index,
+		Type: rule.Type,
+		ID: id,
+		Parent: parentID,
+		Pipeline: rule.Pipeline,
+		Action: elastic.ActionUpdate,
+		Data: make(map[string]interface{}, len(beforeValues)),
+	}
+	for i, c := range rule.TableInfo.Columns {
+		exist, pass := rule.CheckWhere(c.Name, r.makeReqColumnData(&c, afterValues[i]))
+		if exist && !pass {
+			req.Action = elastic.ActionDelete
+			break
+		}
+		if exist && !reflect.DeepEqual(afterValues[i], beforeValues[i]) {
+			req.Action = elastic.ActionIndex
+		}
+	}
 
 	// maybe dangerous if something wrong delete before?
-	req.Action = elastic.ActionUpdate
-
 	for i, c := range rule.TableInfo.Columns {
 		mapped := false
 		if !rule.CheckFilter(c.Name) {
 			continue
 		}
-		if reflect.DeepEqual(beforeValues[i], afterValues[i]) {
+		if req.Action != elastic.ActionIndex && reflect.DeepEqual(beforeValues[i], afterValues[i]) {
 			//nothing changed
 			continue
 		}
@@ -420,8 +461,8 @@ func (r *River) makeUpdateReqData(req *elastic.BulkRequest, rule *Rule,
 		if mapped == false {
 			req.Data[c.Name] = r.makeReqColumnData(&c, afterValues[i])
 		}
-
 	}
+	return req
 }
 
 // If id in toml file is none, get primary keys in one row and format them into a string, and PK must not be nil
