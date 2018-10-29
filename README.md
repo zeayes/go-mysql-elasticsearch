@@ -5,8 +5,8 @@ It uses `mysqldump` to fetch the origin data at first, then syncs data increment
 ## Install
 
 + Install Go (1.9+) and set your [GOPATH](https://golang.org/doc/code.html#GOPATH)
-+ `go get github.com/siddontang/go-mysql-elasticsearch`, it will print some messages in console, skip it. :-)
-+ cd `$GOPATH/src/github.com/siddontang/go-mysql-elasticsearch`
++ `go get github.com/zeayes/go-mysql-elasticsearch`, it will print some messages in console, skip it. :-)
++ cd `$GOPATH/src/github.com/zeayes/go-mysql-elasticsearch`
 + `make`
 
 ## How to use?
@@ -48,7 +48,7 @@ tables = ["t3", t4]
 
 `schema` is the database name, and `tables` includes the table need to be synced.
 
-If you want to sync **all table in database**, you can use **asterisk(\*)**.  
+If you want to sync **all table in database**, you can use **asterisk(\*)**.
 ```
 [[source]]
 schema = "test"
@@ -60,7 +60,7 @@ tables = ["*"]
 
 ## Rule
 
-By default, go-mysql-elasticsearch will use MySQL table name as the Elasticserach's index and type name, use MySQL table field name as the Elasticserach's field name.  
+By default, go-mysql-elasticsearch will use MySQL table name as the Elasticserach's index and type name, use MySQL table field name as the Elasticserach's field name.
 e.g, if a table named blog, the default index and type in Elasticserach are both named blog, if the table field named title,
 the default field name is also named title.
 
@@ -110,6 +110,19 @@ type = "t"
 ```
 
 Modifier "list" will translates a mysql string field like "a,b,c" on an elastic array type '{"a", "b", "c"}' this is specially useful if you need to use those fields on filtering on elasticsearch.
+
+
+## Action mapping
+
+```
+
+[rule.action]
+# insert action maps to update action
+insert = "update"
+# ignore delete action
+delete = ""
+
+```
 
 ## Wildcard table
 
@@ -163,7 +176,7 @@ type = "tfilter"
 filter = ["id", "name"]
 ```
 
-In the above example, we will only sync MySQL table tfiler's columns `id` and `name` to Elasticsearch. 
+In the above example, we will only sync MySQL table tfiler's columns `id` and `name` to Elasticsearch.
 
 ## Ignore table without a primary key
 When you sync table without a primary key, you can see below error message.
@@ -208,7 +221,7 @@ Although there are some other MySQL rivers for Elasticsearch, like [elasticsearc
 
 ## Donate
 
-If you like the project and want to buy me a cola, you can through: 
+If you like the project and want to buy me a cola, you can through:
 
 |PayPal|微信|
 |------|---|

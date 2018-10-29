@@ -9,7 +9,7 @@ import (
 
 	"github.com/juju/errors"
 	"github.com/siddontang/go-log/log"
-	"github.com/siddontang/go-mysql-elasticsearch/elastic"
+	"github.com/zeayes/go-mysql-elasticsearch/elastic"
 	"github.com/siddontang/go-mysql/canal"
 )
 
@@ -270,15 +270,7 @@ func (r *River) prepareRule() error {
 			return errors.Trace(err)
 		}
 
-		if len(rule.TableInfo.PKColumns) == 0 {
-			if !r.c.SkipNoPkTable {
-				return errors.Errorf("%s.%s must have a PK for a column", rule.Schema, rule.Table)
-			}
-
-			log.Errorf("ignored table without a primary key: %s\n", rule.TableInfo.Name)
-		} else {
-			rules[key] = rule
-		}
+		rules[key] = rule
 	}
 	r.rules = rules
 

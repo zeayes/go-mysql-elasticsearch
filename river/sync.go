@@ -10,11 +10,11 @@ import (
 
 	"github.com/juju/errors"
 	"github.com/siddontang/go-log/log"
-	"github.com/siddontang/go-mysql-elasticsearch/elastic"
 	"github.com/siddontang/go-mysql/canal"
 	"github.com/siddontang/go-mysql/mysql"
 	"github.com/siddontang/go-mysql/replication"
 	"github.com/siddontang/go-mysql/schema"
+	"github.com/zeayes/go-mysql-elasticsearch/elastic"
 )
 
 const (
@@ -180,6 +180,11 @@ func (r *River) syncLoop() {
 func (r *River) makeRequest(rule *Rule, action string, rows [][]interface{}) ([]*elastic.BulkRequest, error) {
 	reqs := make([]*elastic.BulkRequest, 0, len(rows))
 
+	esAction := rule.ActionMapping[action]
+	if esAction == "" {
+		return nil, nil
+	}
+
 	for _, values := range rows {
 		id, err := r.getDocID(rule, values)
 		if err != nil {
@@ -193,7 +198,7 @@ func (r *River) makeRequest(rule *Rule, action string, rows [][]interface{}) ([]
 			}
 		}
 
-		if action == canal.DeleteAction {
+		if esAction == elastic.ActionDelete {
 			req := &elastic.BulkRequest{
 				Index: rule.Index,
 				Type: rule.Type,
@@ -206,11 +211,15 @@ func (r *River) makeRequest(rule *Rule, action string, rows [][]interface{}) ([]
 			reqs = append(reqs, req)
 			continue
 		}
-		req := r.makeInsertReqData(rule, values, id, parentID)
+		req := r.makeInsertReqData(rule, values, esAction, id, parentID)
 		if req == nil {
 			continue
 		}
-		r.st.InsertNum.Add(1)
+		if esAction == elastic.ActionIndex {
+			r.st.InsertNum.Add(1)
+		} else {
+			r.st.UpdateNum.Add(1)
+		}
 		reqs = append(reqs, req)
 	}
 
@@ -229,7 +238,10 @@ func (r *River) makeUpdateRequest(rule *Rule, rows [][]interface{}) ([]*elastic.
 	if len(rows)%2 != 0 {
 		return nil, errors.Errorf("invalid update rows event, must have 2x rows, but %d", len(rows))
 	}
-
+	esAction := rule.ActionMapping[canal.UpdateAction]
+	if esAction == "" {
+		return nil,nil
+	}
 	reqs := make([]*elastic.BulkRequest, 0, len(rows))
 
 	for i := 0; i < len(rows); i += 2 {
@@ -265,7 +277,7 @@ func (r *River) makeUpdateRequest(rule *Rule, rows [][]interface{}) ([]*elastic.
 			r.st.DeleteNum.Add(1)
 			reqs = append(reqs, req)
 
-			req = r.makeInsertReqData(rule, rows[i+1], afterID, afterParentID)
+			req = r.makeInsertReqData(rule, rows[i+1], elastic.ActionDelete, afterID, afterParentID)
 			if req == nil {
 				continue
 			}
@@ -275,7 +287,7 @@ func (r *River) makeUpdateRequest(rule *Rule, rows [][]interface{}) ([]*elastic.
 		}
 		var req *elastic.BulkRequest
 		if len(rule.Pipeline) > 0 {
-			req = r.makeInsertReqData(rule, rows[i+1], beforeID, beforeParentID)
+			req = r.makeInsertReqData(rule, rows[i+1], elastic.ActionIndex, beforeID, beforeParentID)
 		} else {
 			req = r.makeUpdateReqData(rule, rows[i], rows[i+1], beforeID, beforeParentID)
 		}
@@ -385,14 +397,14 @@ func (r *River) getFieldParts(k string, v string) (string, string, string) {
 	return mysql, elastic, fieldType
 }
 
-func (r *River) makeInsertReqData(rule *Rule, values []interface{}, id, parentID string) *elastic.BulkRequest {
+func (r *River) makeInsertReqData(rule *Rule, values []interface{}, action, id, parentID string) *elastic.BulkRequest {
 	req := &elastic.BulkRequest{
 		Index: rule.Index,
 		Type: rule.Type,
 		ID: id,
 		Parent: parentID,
 		Pipeline: rule.Pipeline,
-		Action: elastic.ActionIndex,
+		Action: action,
 		Data: make(map[string]interface{}, len(values)),
 	}
 

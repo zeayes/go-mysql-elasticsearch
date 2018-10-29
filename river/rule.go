@@ -4,8 +4,21 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/siddontang/go-mysql/canal"
 	"github.com/siddontang/go-mysql/schema"
+	"github.com/zeayes/go-mysql-elasticsearch/elastic"
 )
+
+var ElasticActions = map[string]string{
+	elastic.ActionIndex:  canal.InsertAction,
+	elastic.ActionUpdate: canal.UpdateAction,
+	elastic.ActionDelete: canal.DeleteAction,
+}
+var DefaultActionMapping = map[string]string{
+	canal.InsertAction: elastic.ActionIndex,
+	canal.UpdateAction: elastic.ActionUpdate,
+	canal.DeleteAction: elastic.ActionDelete,
+}
 
 // Rule is the rule for how to sync data from MySQL to ES.
 // If you want to sync MySQL data into elasticsearch, you must set a rule to let use know how to do it.
@@ -25,6 +38,8 @@ type Rule struct {
 	// Sometimes, you want to use different name, e.g, the MySQL file name is title,
 	// but in Elasticsearch, you want to name it my_title.
 	FieldMapping map[string]string `toml:"field"`
+
+	ActionMapping map[string]string `toml:"action"`
 
 	// MySQL table information
 	TableInfo *schema.Table
@@ -49,6 +64,7 @@ func newDefaultRule(schema string, table string) *Rule {
 
 	r.Where = make(map[string]interface{})
 	r.FieldMapping = make(map[string]string)
+	r.ActionMapping = make(map[string]string)
 
 	return r
 }
@@ -60,6 +76,22 @@ func (r *Rule) prepare() error {
 
 	if r.Where == nil {
 		r.Where = make(map[string]interface{})
+	}
+
+	if r.ActionMapping == nil {
+		r.ActionMapping = DefaultActionMapping
+	}
+
+	for key, value := range r.ActionMapping {
+		v, ok := DefaultActionMapping[key]
+		if ok {
+			_, exist := ElasticActions[v]
+			if exist {
+				r.ActionMapping[key] = value
+				continue
+			}
+		}
+		delete(r.ActionMapping, key)
 	}
 
 	if len(r.Index) == 0 {
