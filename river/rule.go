@@ -82,14 +82,16 @@ func (r *Rule) prepare() error {
 		r.ActionMapping = DefaultActionMapping
 	}
 
-	for key, value := range r.ActionMapping {
-		v, ok := DefaultActionMapping[key]
-		if ok {
-			_, exist := ElasticActions[v]
-			if exist {
-				r.ActionMapping[key] = value
-				continue
-			}
+	for key, value := range DefaultActionMapping {
+		v, ok := r.ActionMapping[key]
+		if !ok {
+			r.ActionMapping[key] = value
+			continue
+		}
+		_, exist := ElasticActions[v]
+		if exist {
+			r.ActionMapping[key] = value
+			continue
 		}
 		delete(r.ActionMapping, key)
 	}
