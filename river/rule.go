@@ -44,6 +44,8 @@ type Rule struct {
 	// MySQL table information
 	TableInfo *schema.Table
 
+	TableFields map[string]int
+
 	//only MySQL fields in filter will be synced , default sync all fields
 	Filter []string `toml:"filter"`
 
@@ -63,6 +65,7 @@ func newDefaultRule(schema string, table string) *Rule {
 	r.Type = lowerTable
 
 	r.Where = make(map[string]interface{})
+	r.TableFields = make(map[string]int)
 	r.FieldMapping = make(map[string]string)
 	r.ActionMapping = make(map[string]string)
 
@@ -70,6 +73,9 @@ func newDefaultRule(schema string, table string) *Rule {
 }
 
 func (r *Rule) prepare() error {
+	if r.TableFields == nil {
+		r.TableFields = make(map[string]int)
+	}
 	if r.FieldMapping == nil {
 		r.FieldMapping = make(map[string]string)
 	}
@@ -79,21 +85,12 @@ func (r *Rule) prepare() error {
 	}
 
 	if r.ActionMapping == nil {
-		r.ActionMapping = DefaultActionMapping
+		r.ActionMapping = make(map[string]string, len(DefaultActionMapping))
 	}
-
-	for key, value := range DefaultActionMapping {
-		v, ok := r.ActionMapping[key]
-		if !ok {
-			r.ActionMapping[key] = value
-			continue
+	for action, esAction := range DefaultActionMapping {
+		if _, ok := r.ActionMapping[action]; !ok {
+			r.ActionMapping[action] = esAction
 		}
-		_, exist := ElasticActions[v]
-		if exist {
-			r.ActionMapping[key] = value
-			continue
-		}
-		delete(r.ActionMapping, key)
 	}
 
 	if len(r.Index) == 0 {

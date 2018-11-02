@@ -9,8 +9,8 @@ import (
 
 	"github.com/juju/errors"
 	"github.com/siddontang/go-log/log"
-	"github.com/zeayes/go-mysql-elasticsearch/elastic"
 	"github.com/siddontang/go-mysql/canal"
+	"github.com/zeayes/go-mysql-elasticsearch/elastic"
 )
 
 // ErrRuleNotExist is the error if rule is not defined.
@@ -159,8 +159,30 @@ func (r *River) updateRule(schema, table string) error {
 	}
 
 	rule.TableInfo = tableInfo
+	r.setFieldMapping(rule)
 
 	return nil
+}
+
+func (r *River) setFieldMapping(rule *Rule) {
+	defaultFields := make([]string, len(rule.TableInfo.Columns))
+	for index, column := range rule.TableInfo.Columns {
+		rule.TableFields[column.Name] = index
+		defaultFields = append(defaultFields, column.Name)
+	}
+
+	// 没有设置，默认导出所有字段到 doc 中
+	if rule.Filter == nil {
+		rule.Filter = defaultFields
+	}
+	if rule.FieldMapping == nil {
+		rule.FieldMapping = make(map[string]string, len(rule.Filter))
+	}
+	for _, field := range rule.Filter {
+		if _, ok := rule.FieldMapping[field]; !ok {
+			rule.FieldMapping[field] = field
+		}
+	}
 }
 
 func (r *River) parseSource() (map[string][]string, error) {
@@ -269,6 +291,7 @@ func (r *River) prepareRule() error {
 		if rule.TableInfo, err = r.canal.GetTable(rule.Schema, rule.Table); err != nil {
 			return errors.Trace(err)
 		}
+		r.setFieldMapping(rule)
 
 		rules[key] = rule
 	}
