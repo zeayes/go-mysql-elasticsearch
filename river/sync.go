@@ -10,11 +10,11 @@ import (
 
 	"github.com/juju/errors"
 	"github.com/siddontang/go-log/log"
-	"github.com/siddontang/go-mysql-elasticsearch/elastic"
 	"github.com/siddontang/go-mysql/canal"
 	"github.com/siddontang/go-mysql/mysql"
 	"github.com/siddontang/go-mysql/replication"
 	"github.com/siddontang/go-mysql/schema"
+	"github.com/zeayes/go-mysql-elasticsearch/elastic"
 )
 
 const (
@@ -25,9 +25,12 @@ const (
 
 const (
 	fieldTypeList = "list"
+	fieldTypeString = "string"
 	// for the mysql int type to es date type
 	// set the [rule.field] created_time = ",date"
 	fieldTypeDate = "date"
+	// transfer datetime to timestamp
+	filedTypeTimestamp = "timestamp"
 )
 
 const mysqlDateFormat = "2006-01-02"
@@ -180,6 +183,11 @@ func (r *River) syncLoop() {
 func (r *River) makeRequest(rule *Rule, action string, rows [][]interface{}) ([]*elastic.BulkRequest, error) {
 	reqs := make([]*elastic.BulkRequest, 0, len(rows))
 
+	esAction := rule.ActionMapping[action]
+	if esAction == "" {
+		return nil, nil
+	}
+
 	for _, values := range rows {
 		id, err := r.getDocID(rule, values)
 		if err != nil {
@@ -193,24 +201,28 @@ func (r *River) makeRequest(rule *Rule, action string, rows [][]interface{}) ([]
 			}
 		}
 
-		if action == canal.DeleteAction {
+		if esAction == elastic.ActionDelete {
 			req := &elastic.BulkRequest{
-				Index: rule.Index,
-				Type: rule.Type,
-				ID: id,
-				Parent: parentID,
+				Index:    rule.Index,
+				Type:     rule.Type,
+				ID:       id,
+				Parent:   parentID,
 				Pipeline: rule.Pipeline,
-				Action: elastic.ActionDelete,
+				Action:   elastic.ActionDelete,
 			}
 			r.st.DeleteNum.Add(1)
 			reqs = append(reqs, req)
 			continue
 		}
-		req := r.makeInsertReqData(rule, values, id, parentID)
+		req := r.makeInsertReqData(rule, values, esAction, id, parentID)
 		if req == nil {
 			continue
 		}
-		r.st.InsertNum.Add(1)
+		if esAction == elastic.ActionIndex {
+			r.st.InsertNum.Add(1)
+		} else {
+			r.st.UpdateNum.Add(1)
+		}
 		reqs = append(reqs, req)
 	}
 
@@ -229,7 +241,10 @@ func (r *River) makeUpdateRequest(rule *Rule, rows [][]interface{}) ([]*elastic.
 	if len(rows)%2 != 0 {
 		return nil, errors.Errorf("invalid update rows event, must have 2x rows, but %d", len(rows))
 	}
-
+	esAction := rule.ActionMapping[canal.UpdateAction]
+	if esAction == "" {
+		return nil, nil
+	}
 	reqs := make([]*elastic.BulkRequest, 0, len(rows))
 
 	for i := 0; i < len(rows); i += 2 {
@@ -256,16 +271,16 @@ func (r *River) makeUpdateRequest(rule *Rule, rows [][]interface{}) ([]*elastic.
 
 		if beforeID != afterID || beforeParentID != afterParentID {
 			req := &elastic.BulkRequest{
-				Index: rule.Index,
-				Type: rule.Type,
-				ID: beforeID,
+				Index:  rule.Index,
+				Type:   rule.Type,
+				ID:     beforeID,
 				Parent: beforeParentID,
 				Action: elastic.ActionDelete,
 			}
 			r.st.DeleteNum.Add(1)
 			reqs = append(reqs, req)
 
-			req = r.makeInsertReqData(rule, rows[i+1], afterID, afterParentID)
+			req = r.makeInsertReqData(rule, rows[i+1], elastic.ActionDelete, afterID, afterParentID)
 			if req == nil {
 				continue
 			}
@@ -275,7 +290,7 @@ func (r *River) makeUpdateRequest(rule *Rule, rows [][]interface{}) ([]*elastic.
 		}
 		var req *elastic.BulkRequest
 		if len(rule.Pipeline) > 0 {
-			req = r.makeInsertReqData(rule, rows[i+1], beforeID, beforeParentID)
+			req = r.makeInsertReqData(rule, rows[i+1], elastic.ActionIndex, beforeID, beforeParentID)
 		} else {
 			req = r.makeUpdateReqData(rule, rows[i], rows[i+1], beforeID, beforeParentID)
 		}
@@ -385,82 +400,79 @@ func (r *River) getFieldParts(k string, v string) (string, string, string) {
 	return mysql, elastic, fieldType
 }
 
-func (r *River) makeInsertReqData(rule *Rule, values []interface{}, id, parentID string) *elastic.BulkRequest {
-	req := &elastic.BulkRequest{
-		Index: rule.Index,
-		Type: rule.Type,
-		ID: id,
-		Parent: parentID,
-		Pipeline: rule.Pipeline,
-		Action: elastic.ActionIndex,
-		Data: make(map[string]interface{}, len(values)),
-	}
-
-	for i, c := range rule.TableInfo.Columns {
-		if !rule.CheckFilter(c.Name) {
-			continue
+func (r *River) makeFieldData(rule *Rule, values []interface{}) map[string]interface{}  {
+	data := make(map[string]interface{}, len(rule.FieldMapping))
+	for key, value := range rule.FieldMapping {
+		esField, mysqlField, fieldType := r.getFieldParts(key, value)
+		i := rule.TableFields[mysqlField]
+		c := rule.TableInfo.Columns[i]
+		var value interface{}
+		if fieldType == "" {
+			value = r.makeReqColumnData(&c, values[i])
+		} else {
+			value = r.getFieldValue(&c, fieldType, values[i])
 		}
-		value := r.makeReqColumnData(&c, values[i])
 		_, pass := rule.CheckWhere(c.Name, value)
 		if !pass {
 			return nil
 		}
-		mapped := false
-		for k, v := range rule.FieldMapping {
-			mysql, elastic, fieldType := r.getFieldParts(k, v)
-			if mysql == c.Name {
-				mapped = true
-				req.Data[elastic] = r.getFieldValue(&c, fieldType, values[i])
-			}
-		}
-		if mapped == false {
-			req.Data[c.Name] = value
-		}
+		data[esField] = value
 	}
-	return req
+	return data
+}
+
+func (r *River) makeInsertReqData(rule *Rule, values []interface{}, action, id, parentID string) *elastic.BulkRequest {
+	data := r.makeFieldData(rule, values)
+	if data == nil {
+		return nil
+	}
+
+	return &elastic.BulkRequest{
+		Index:    rule.Index,
+		Type:     rule.Type,
+		ID:       id,
+		Parent:   parentID,
+		Pipeline: rule.Pipeline,
+		Action:   action,
+		Data:     data,
+	}
 }
 
 func (r *River) makeUpdateReqData(rule *Rule, beforeValues []interface{}, afterValues []interface{}, id, parentID string) *elastic.BulkRequest {
 	req := &elastic.BulkRequest{
-		Index: rule.Index,
-		Type: rule.Type,
-		ID: id,
-		Parent: parentID,
+		Index:    rule.Index,
+		Type:     rule.Type,
+		ID:       id,
+		Parent:   parentID,
 		Pipeline: rule.Pipeline,
-		Action: elastic.ActionUpdate,
+		Action:   elastic.ActionUpdate,
 		Data: make(map[string]interface{}, len(beforeValues)),
 	}
 	for i, c := range rule.TableInfo.Columns {
 		exist, pass := rule.CheckWhere(c.Name, r.makeReqColumnData(&c, afterValues[i]))
 		if exist && !pass {
 			req.Action = elastic.ActionDelete
-			break
+			return req
 		}
 		if exist && !reflect.DeepEqual(afterValues[i], beforeValues[i]) {
 			req.Action = elastic.ActionIndex
 		}
 	}
 
-	// maybe dangerous if something wrong delete before?
-	for i, c := range rule.TableInfo.Columns {
-		mapped := false
-		if !rule.CheckFilter(c.Name) {
+	afterData := r.makeFieldData(rule, afterValues)
+	if afterData == nil {
+		return nil
+	}
+	beforeData := r.makeFieldData(rule, beforeValues)
+	for key, value := range afterData {
+		v, ok := beforeData[key]
+		if ok && reflect.DeepEqual(value, v) && req.Action != elastic.ActionIndex {
 			continue
 		}
-		if req.Action != elastic.ActionIndex && reflect.DeepEqual(beforeValues[i], afterValues[i]) {
-			//nothing changed
-			continue
-		}
-		for k, v := range rule.FieldMapping {
-			mysql, elastic, fieldType := r.getFieldParts(k, v)
-			if mysql == c.Name {
-				mapped = true
-				req.Data[elastic] = r.getFieldValue(&c, fieldType, afterValues[i])
-			}
-		}
-		if mapped == false {
-			req.Data[c.Name] = r.makeReqColumnData(&c, afterValues[i])
-		}
+		req.Data[key] = value
+	}
+	if len(req.Data) == 0 {
+		return nil
 	}
 	return req
 }
@@ -516,7 +528,6 @@ func (r *River) doBulk(reqs []*elastic.BulkRequest) error {
 	if len(reqs) == 0 {
 		return nil
 	}
-
 	if resp, err := r.es.Bulk(reqs); err != nil {
 		log.Errorf("sync docs err %v after binlog %s", err, r.canal.SyncedPosition())
 		return errors.Trace(err)
@@ -545,7 +556,8 @@ func (r *River) getFieldValue(col *schema.TableColumn, fieldType string, value i
 		} else {
 			fieldValue = v
 		}
-
+	case fieldTypeString:
+		fieldValue = value.(string)
 	case fieldTypeDate:
 		if col.Type == schema.TYPE_NUMBER {
 			col.Type = schema.TYPE_DATETIME
@@ -555,6 +567,22 @@ func (r *River) getFieldValue(col *schema.TableColumn, fieldType string, value i
 			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 				fieldValue = r.makeReqColumnData(col, time.Unix(v.Int(), 0).Format(mysql.TimeFormat))
 			}
+		}
+	case filedTypeTimestamp:
+		if col.Type == schema.TYPE_DATE {
+			ts, err := time.ParseInLocation(mysqlDateFormat, value.(string), time.Local)
+			if err != nil {
+				log.Errorf("parse field %s to timestamp fail %v", col.Name, err)
+				fieldValue = value
+			}
+			fieldValue = ts.Unix()
+		} else if col.Type == schema.TYPE_DATETIME {
+			ts, err := time.ParseInLocation(mysql.TimeFormat, value.(string), time.Local)
+			if err != nil {
+				log.Errorf("parse field %s to timestamp fail %v", col.Name, err)
+				fieldValue = value
+			}
+			fieldValue = ts.Unix()
 		}
 	}
 
